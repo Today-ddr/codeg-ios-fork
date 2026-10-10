@@ -1,0 +1,84 @@
+name: Build unsigned IPA
+
+# Manual-only: produce an UNSIGNED .ipa for sideloading (AltStore / Sideloadly).
+# No Apple credentials are involved — signing happens on-device with the
+# user's own Apple ID.
+on:
+  workflow_dispatch:
+
+env:
+  SCHEME: CodegiOS
+  PROJECT: CodegiOS.xcodeproj
+
+jobs:
+  build-ipa:
+    runs-on: macos-26
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Select Xcode
+        run: |
+          # macos-26 ships Xcode 26.6 as default; the project needs the
+          # iOS 26 SDK, which that Xcode provides.
+          sudo xcode-select -s /Applications/Xcode.app
+          xcodebuild -version
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Build (unsigned, device)
+        run: |
+          xcodebuild build \
+            -project "$PROJECT" \
+            -scheme "$SCHEME" \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            -skipMacroValidation \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGN_ENTITLEMENTS="" \
+            DEVELOPMENT_TEAM="" \
+            | tee build.log | tail -40
+
+      - name: Locate built .app
+        id: app
+        run: |
+          APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
+          [ -n "$APP_PATH" ] || { echo "no .app produced"; tail -60 build.log; exit 1; }
+          echo "path=$APP_PATH" >> "$GITHUB_OUTPUT"
+          echo "Found: $APP_PATH"
+          # An unsigned app must have no embedded signature.
+          if [ -d "$APP_PATH/_CodeSignature" ]; then
+            echo "::warning::app carries a _CodeSignature directory; stripping it"
+            rm -rf "$APP_PATH/_CodeSignature"
+          fi
+
+      - name: Package as .ipa
+        run: |
+          set -euo pipefail
+          APP="${{ steps.app.outputs.path }}"
+          rm -rf Payload Codeg-unsigned.ipa
+          mkdir -p Payload
+          cp -R "$APP" Payload/
+          # Zip preserves symlinks and exec bits, which the app bundle needs.
+          zip -qry Codeg-unsigned.ipa Payload
+          rm -rf Payload
+          ls -lh Codeg-unsigned.ipa
+          echo "--- bundle sanity ---"
+          unzip -l Codeg-unsigned.ipa | head -15
+
+      - name: Upload .ipa
+        uses: actions/upload-artifact@v4
+        with:
+          name: codeg-ios-unsigned-ipa-${{ github.run_number }}
+          path: Codeg-unsigned.ipa
+          if-no-files-found: error
+          retention-days: 30
