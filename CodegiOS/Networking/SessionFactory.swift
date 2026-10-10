@@ -176,7 +176,10 @@ private final class RequestCancellation: @unchecked Sendable {
 
     private func checkDeadline() {
         let task = lock.withLock { () -> URLSessionTask? in
-            guard !completed, !cancelled, let task,
+            // `self.task` explicitly: the plain `let task` binding below sits in
+            // the initializer of an outer `let task`, so an unqualified `task`
+            // reads as a capture of the variable being declared.
+            guard !completed, !cancelled, let task = self.task,
                   deadline?.expired(bytesSent: task.countOfBytesSent) == true else { return nil }
             timedOut = true
             return task

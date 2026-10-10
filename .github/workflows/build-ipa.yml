@@ -33,6 +33,7 @@ jobs:
 
       - name: Build (unsigned, device)
         run: |
+          set -o pipefail   # without this the tee below swallows xcodebuild's status
           xcodebuild build \
             -project "$PROJECT" \
             -scheme "$SCHEME" \
@@ -46,16 +47,32 @@ jobs:
             CODE_SIGN_IDENTITY="" \
             CODE_SIGN_ENTITLEMENTS="" \
             DEVELOPMENT_TEAM="" \
-            | tee build.log | tail -40
+            2>&1 | tee build.log | tail -60
 
       - name: Locate built .app
         id: app
         run: |
+          set -euo pipefail
           APP_PATH="$(find build/Build/Products/Release-iphoneos -maxdepth 1 -name '*.app' | head -1)"
           [ -n "$APP_PATH" ] || { echo "no .app produced"; tail -60 build.log; exit 1; }
+
+          # A failed compile still leaves a resource-only .app skeleton behind.
+          # Its main binary is what the device actually launches, so refuse to
+          # package a bundle without one — that is exactly how a 2 MB hollow
+          # .ipa got uploaded once.
+          EXEC="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$APP_PATH/Info.plist")"
+          BIN="$APP_PATH/$EXEC"
+          if [ ! -f "$BIN" ]; then
+            echo "::error::$APP_PATH has no main binary ($EXEC) — the build failed"
+            tail -60 build.log
+            exit 1
+          fi
+          echo "Executable: $BIN ($(du -h "$BIN" | cut -f1))"
+
           echo "path=$APP_PATH" >> "$GITHUB_OUTPUT"
           echo "Found: $APP_PATH"
-          # An unsigned app must have no embedded signature.
+
+          # An unsigned app must carry no embedded signature.
           if [ -d "$APP_PATH/_CodeSignature" ]; then
             echo "::warning::app carries a _CodeSignature directory; stripping it"
             rm -rf "$APP_PATH/_CodeSignature"
